@@ -11,7 +11,7 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://user:password@localhost:5432/ad_tracker?sslmode=disable"),
+		DatabaseURL: getEnv("DATABASE_URL", "postgresql://neondb_owner:npg_kGErW7FMByH2@ep-muddy-poetry-adb64k0i-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"),
 		Port:        getEnv("PORT", "8080"),
 	}
 }
