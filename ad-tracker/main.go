@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -390,11 +391,13 @@ func getEnv(key, defaultValue string) string {
 }
 
 func setupDatabase() (*gorm.DB, error) {
-	dsn := getEnv("DATABASE_URL", "postgresql://neondb_owner:npg_kGErW7FMByH2@ep-muddy-poetry-adb64k0i-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+	dsn := getEnv("DATABASE_URL", "postgresql://neondb_owner:npg_2gSkEdIJryj9@ep-delicate-sea-a8qjn7u5-pooler.eastus2.azure.neon.tech/neondb?sslmode=require&channel_binding=require")
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
 	})
+	fmt.Println("Using DSN:", dsn)
+
 	if err != nil {
 		return nil, err
 	}
