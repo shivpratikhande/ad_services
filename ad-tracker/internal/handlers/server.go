@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"ad-tracking-system/internal/repository"
+	repositories "ad-tracking-system/internal/repository"
 	"ad-tracking-system/internal/services"
 
 	"github.com/segmentio/kafka-go"
@@ -13,13 +13,13 @@ type Server struct {
 	db                  *gorm.DB
 	logger              *logrus.Logger
 	clickQueue          *services.ClickQueue
-	analyticsRepository *repository.AnalyticsRepository
+	analyticsRepository *repositories.AnalyticsRepository
 	KafkaWriter         *kafka.Writer
 }
 
 func NewServer(db *gorm.DB, logger *logrus.Logger, kafkaWriter *kafka.Writer) *Server {
 	clickQueue := services.NewClickQueue(db, logger, 10000)
-	analyticsRepo := repository.NewAnalyticsRepository(db)
+	analyticsRepo := repositories.NewAnalyticsRepository(db, logger)
 
 	// Start background flusher for the queue
 	// clickQueue.StartBackgroundFlusher(30 * time.Second)

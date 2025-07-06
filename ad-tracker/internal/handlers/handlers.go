@@ -110,7 +110,8 @@ func (s *Server) GetAnalytics(c *gin.Context) {
 	duration := s.parseDuration(timeframe)
 	since := time.Now().UTC().Add(-duration)
 
-	beginningOfToday := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC)
+	// Use UTC for consistent timezone handling
+	beginningOfToday := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), time.Now().UTC().Day(), 0, 0, 0, 0, time.UTC)
 
 	s.logger.WithFields(logrus.Fields{
 		"timeframe": timeframe,
@@ -145,6 +146,57 @@ func (s *Server) GetAnalytics(c *gin.Context) {
 	}
 }
 
+func (s *Server) getDebugCounts(adIDStr string, since, beginningOfToday time.Time) gin.H {
+	var totalCount int64
+	s.db.Model(&models.ClickEvent{}).Count(&totalCount)
+
+	var filteredCount int64
+	var filteredCountToday int64
+
+	// Add timezone-aware debugging
+	var timezoneTestCount int64
+	s.db.Raw("SELECT COUNT(*) FROM click_events WHERE timestamp AT TIME ZONE 'UTC' >= ? AT TIME ZONE 'UTC'", since).Scan(&timezoneTestCount)
+
+	if adIDStr != "" {
+		adID, err := strconv.ParseUint(adIDStr, 10, 32)
+		if err != nil {
+			return gin.H{"error": "Invalid ad_id"}
+		}
+		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), since).Count(&filteredCount)
+		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), beginningOfToday).Count(&filteredCountToday)
+	} else {
+		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", since).Count(&filteredCount)
+		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", beginningOfToday).Count(&filteredCountToday)
+	}
+
+	// Get sample timestamps for debugging
+	var sampleTimestamps []time.Time
+	s.db.Model(&models.ClickEvent{}).Select("timestamp").Order("timestamp desc").Limit(3).Pluck("timestamp", &sampleTimestamps)
+
+	debugInfo := gin.H{
+		"total_records":          totalCount,
+		"filtered_records":       filteredCount,
+		"filtered_records_today": filteredCountToday,
+		"timezone_test_count":    timezoneTestCount,
+		"since":                  since,
+		"beginning_of_today":     beginningOfToday,
+		"now":                    time.Now().UTC(),
+		"sample_timestamps":      sampleTimestamps,
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"total_count":          totalCount,
+		"filtered_count":       filteredCount,
+		"filtered_count_today": filteredCountToday,
+		"timezone_test_count":  timezoneTestCount,
+		"since":                since,
+		"beginning_of_today":   beginningOfToday,
+		"sample_timestamps":    sampleTimestamps,
+	}).Info("Record counts with timezone debugging")
+
+	return debugInfo
+}
+
 func (s *Server) parseDuration(timeframe string) time.Duration {
 	switch timeframe {
 	case "1h":
@@ -160,43 +212,100 @@ func (s *Server) parseDuration(timeframe string) time.Duration {
 	}
 }
 
-func (s *Server) getDebugCounts(adIDStr string, since, beginningOfToday time.Time) gin.H {
-	var totalCount int64
-	s.db.Model(&models.ClickEvent{}).Count(&totalCount)
+func (s *Server) DebugAnalytics(c *gin.Context) {
+	adIDStr := c.Query("ad_id")
+	timeframe := c.DefaultQuery("timeframe", "24h")
 
-	var filteredCount int64
-	var filteredCountToday int64
+	duration := s.parseDuration(timeframe)
+	since := time.Now().UTC().Add(-duration)
+
+	// Get sample data to understand what's in the database
+	var clickEvents []models.ClickEvent
+	query := s.db.Order("timestamp DESC").Limit(10)
 
 	if adIDStr != "" {
 		adID, err := strconv.ParseUint(adIDStr, 10, 32)
 		if err != nil {
-			return gin.H{"error": "Invalid ad_id"}
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ad_id"})
+			return
 		}
-		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), since).Count(&filteredCount)
-		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), beginningOfToday).Count(&filteredCountToday)
+		query = query.Where("ad_id = ?", uint(adID))
+	}
+
+	query.Find(&clickEvents)
+
+	// Get counts with different approaches
+	var totalCount int64
+	var sinceCount int64
+	var recentCount int64
+
+	s.db.Model(&models.ClickEvent{}).Count(&totalCount)
+	s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", since).Count(&sinceCount)
+	s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", time.Now().UTC().Add(-time.Hour)).Count(&recentCount)
+
+	// Test raw SQL approach
+	var rawResult struct {
+		TotalClicks int64 `db:"total_clicks"`
+		LastHour    int64 `db:"last_hour"`
+		LastDay     int64 `db:"last_day"`
+	}
+
+	lastHour := time.Now().UTC().Add(-time.Hour)
+	lastDay := time.Now().UTC().Add(-24 * time.Hour)
+
+	if adIDStr != "" {
+		adID, _ := strconv.ParseUint(adIDStr, 10, 32)
+		s.db.Raw(`
+			SELECT 
+				COUNT(*) as total_clicks,
+				COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_hour,
+				COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_day
+			FROM click_events 
+			WHERE ad_id = ?
+		`, lastHour, lastDay, uint(adID)).Scan(&rawResult)
 	} else {
-		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", since).Count(&filteredCount)
-		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", beginningOfToday).Count(&filteredCountToday)
+		s.db.Raw(`
+			SELECT 
+				COUNT(*) as total_clicks,
+				COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_hour,
+				COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_day
+			FROM click_events
+		`, lastHour, lastDay).Scan(&rawResult)
 	}
 
-	debugInfo := gin.H{
-		"total_records":          totalCount,
-		"filtered_records":       filteredCount,
-		"filtered_records_today": filteredCountToday,
-		"since":                  since,
-		"beginning_of_today":     beginningOfToday,
-		"now":                    time.Now().UTC(),
+	// Test analytics repository
+	var analyticsResult interface{}
+	if adIDStr != "" {
+		adID, _ := strconv.ParseUint(adIDStr, 10, 32)
+		analyticsResult = s.analyticsRepository.GetAdAnalytics(uint(adID), since)
+	} else {
+		analyticsResult = s.analyticsRepository.GetAllAnalytics(since)
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"total_count":          totalCount,
-		"filtered_count":       filteredCount,
-		"filtered_count_today": filteredCountToday,
-		"since":                since,
-		"beginning_of_today":   beginningOfToday,
-	}).Info("Record counts")
-
-	return debugInfo
+	c.JSON(http.StatusOK, gin.H{
+		"debug_info": gin.H{
+			"query_params": gin.H{
+				"ad_id":     adIDStr,
+				"timeframe": timeframe,
+				"duration":  duration.String(),
+				"since":     since,
+			},
+			"current_time": gin.H{
+				"utc":       time.Now().UTC(),
+				"local":     time.Now(),
+				"last_hour": lastHour,
+				"last_day":  lastDay,
+			},
+			"counts": gin.H{
+				"total_in_db":    totalCount,
+				"since_count":    sinceCount,
+				"recent_count":   recentCount,
+				"raw_sql_result": rawResult,
+			},
+			"sample_records": clickEvents,
+		},
+		"analytics_result": analyticsResult,
+	})
 }
 
 func (s *Server) Health(c *gin.Context) {

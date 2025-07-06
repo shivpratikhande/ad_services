@@ -1,116 +1,201 @@
-package repository
+package repositories
 
 import (
+	"ad-tracking-system/internal/models"
 	"time"
 
-	"ad-tracking-system/internal/models"
-
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
 type AnalyticsRepository struct {
-	db *gorm.DB
+	db     *gorm.DB
+	logger *logrus.Logger
 }
 
-func NewAnalyticsRepository(db *gorm.DB) *AnalyticsRepository {
-	return &AnalyticsRepository{db: db}
+func NewAnalyticsRepository(db *gorm.DB, logger *logrus.Logger) *AnalyticsRepository {
+	return &AnalyticsRepository{
+		db:     db,
+		logger: logger,
+	}
 }
 
 func (r *AnalyticsRepository) GetAdAnalytics(adID uint, since time.Time) models.AnalyticsResponse {
-	var total int64
-	var lastHour int64
-	var lastDay int64
+	var analytics models.AnalyticsResponse
 
-	// Use UTC time for consistency
-	now := time.Now().UTC()
-	sinceUTC := since.UTC()
+	// Get basic click count for the timeframe
+	var clickCount int64
+	err := r.db.Model(&models.ClickEvent{}).
+		Where("ad_id = ? AND timestamp >= ?", adID, since).
+		Count(&clickCount).Error
 
-	// Total clicks since the specified time
-	r.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", adID, sinceUTC).Count(&total)
-
-	// Last hour
-	r.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", adID, now.Add(-time.Hour)).Count(&lastHour)
-
-	// Last day
-	r.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", adID, now.Add(-24*time.Hour)).Count(&lastDay)
-
-	return models.AnalyticsResponse{
-		AdID:       adID,
-		ClickCount: total,
-		LastHour:   lastHour,
-		LastDay:    lastDay,
+	if err != nil {
+		r.logger.WithError(err).Error("Failed to get click count")
+		return models.AnalyticsResponse{AdID: adID}
 	}
+
+	// Get last hour count
+	lastHour := time.Now().UTC().Add(-time.Hour)
+	var lastHourCount int64
+	err = r.db.Model(&models.ClickEvent{}).
+		Where("ad_id = ? AND timestamp >= ?", adID, lastHour).
+		Count(&lastHourCount).Error
+
+	if err != nil {
+		r.logger.WithError(err).Error("Failed to get last hour count")
+	}
+
+	// Get last day count
+	lastDay := time.Now().UTC().Add(-24 * time.Hour)
+	var lastDayCount int64
+	err = r.db.Model(&models.ClickEvent{}).
+		Where("ad_id = ? AND timestamp >= ?", adID, lastDay).
+		Count(&lastDayCount).Error
+
+	if err != nil {
+		r.logger.WithError(err).Error("Failed to get last day count")
+	}
+
+	analytics.AdID = adID
+	analytics.ClickCount = clickCount
+	analytics.LastHour = lastHourCount
+	analytics.LastDay = lastDayCount
+	// CTR would need impression data to calculate, leaving it as 0 for now
+
+	r.logger.WithFields(logrus.Fields{
+		"ad_id":       adID,
+		"click_count": clickCount,
+		"last_hour":   lastHourCount,
+		"last_day":    lastDayCount,
+		"since":       since,
+	}).Info("Retrieved ad analytics")
+
+	return analytics
 }
 
 func (r *AnalyticsRepository) GetAllAnalytics(since time.Time) []models.AnalyticsResponse {
-	var results []struct {
-		AdID       uint  `json:"ad_id"`
-		ClickCount int64 `json:"click_count"`
-	}
+	var allAnalytics []models.AnalyticsResponse
 
-	sinceUTC := since.UTC()
-
-	// Use Scan instead of Find for better compatibility with GROUP BY
+	// Get all unique ad IDs that have clicks since the specified time
+	var adIDs []uint
 	err := r.db.Model(&models.ClickEvent{}).
-		Select("ad_id, count(*) as click_count").
-		Where("timestamp >= ?", sinceUTC).
-		Group("ad_id").
-		Scan(&results).Error
+		Where("timestamp >= ?", since).
+		Distinct("ad_id").
+		Pluck("ad_id", &adIDs).Error
 
 	if err != nil {
-		// Log the error if you have logging available
-		// return empty slice if query fails
-		return []models.AnalyticsResponse{}
+		r.logger.WithError(err).Error("Failed to get unique ad IDs")
+		return allAnalytics
 	}
 
-	// If no results found, return empty slice instead of nil
-	if len(results) == 0 {
-		return []models.AnalyticsResponse{}
+	r.logger.WithFields(logrus.Fields{
+		"ad_ids": adIDs,
+		"since":  since,
+	}).Info("Found ad IDs for analytics")
+
+	// Get analytics for each ad
+	for _, adID := range adIDs {
+		analytics := r.GetAdAnalytics(adID, since)
+		allAnalytics = append(allAnalytics, analytics)
 	}
 
-	analytics := make([]models.AnalyticsResponse, len(results))
-	for i, result := range results {
-		analytics[i] = r.GetAdAnalytics(result.AdID, since)
+	return allAnalytics
+}
+
+// Alternative method using raw SQL to handle potential timezone issues
+func (r *AnalyticsRepository) GetAdAnalyticsWithRawSQL(adID uint, since time.Time) models.AnalyticsResponse {
+	var analytics models.AnalyticsResponse
+
+	lastHour := time.Now().UTC().Add(-time.Hour)
+	lastDay := time.Now().UTC().Add(-24 * time.Hour)
+
+	// Use a single query to get all counts
+	var result struct {
+		TotalClicks int64 `db:"total_clicks"`
+		LastHour    int64 `db:"last_hour"`
+		LastDay     int64 `db:"last_day"`
 	}
+
+	query := `
+		SELECT 
+			COUNT(*) as total_clicks,
+			COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_hour,
+			COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_day
+		FROM click_events 
+		WHERE ad_id = ? 
+		AND timestamp >= ?
+	`
+
+	err := r.db.Raw(query, lastHour, lastDay, adID, since).Scan(&result).Error
+	if err != nil {
+		r.logger.WithError(err).Error("Failed to execute raw SQL analytics query")
+		return models.AnalyticsResponse{AdID: adID}
+	}
+
+	analytics.AdID = adID
+	analytics.ClickCount = result.TotalClicks
+	analytics.LastHour = result.LastHour
+	analytics.LastDay = result.LastDay
+
+	r.logger.WithFields(logrus.Fields{
+		"ad_id":       adID,
+		"click_count": result.TotalClicks,
+		"last_hour":   result.LastHour,
+		"last_day":    result.LastDay,
+		"method":      "raw_sql",
+	}).Info("Retrieved ad analytics using raw SQL")
 
 	return analytics
 }
 
-// Alternative simpler version for GetAllAnalytics that doesn't call GetAdAnalytics recursively
-func (r *AnalyticsRepository) GetAllAnalyticsSimple(since time.Time) []models.AnalyticsResponse {
+func (r *AnalyticsRepository) GetAllAnalyticsWithRawSQL(since time.Time) []models.AnalyticsResponse {
+	var allAnalytics []models.AnalyticsResponse
+
+	lastHour := time.Now().UTC().Add(-time.Hour)
+	lastDay := time.Now().UTC().Add(-24 * time.Hour)
+
+	// Get analytics for all ads in a single query
 	var results []struct {
-		AdID       uint  `json:"ad_id"`
-		ClickCount int64 `json:"click_count"`
+		AdID        uint  `db:"ad_id"`
+		TotalClicks int64 `db:"total_clicks"`
+		LastHour    int64 `db:"last_hour"`
+		LastDay     int64 `db:"last_day"`
 	}
 
-	sinceUTC := since.UTC()
-	now := time.Now().UTC()
+	query := `
+		SELECT 
+			ad_id,
+			COUNT(*) as total_clicks,
+			COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_hour,
+			COUNT(CASE WHEN timestamp >= ? THEN 1 END) as last_day
+		FROM click_events 
+		WHERE timestamp >= ?
+		GROUP BY ad_id
+		ORDER BY ad_id
+	`
 
-	// Get basic counts
-	err := r.db.Model(&models.ClickEvent{}).
-		Select("ad_id, count(*) as click_count").
-		Where("timestamp >= ?", sinceUTC).
-		Group("ad_id").
-		Scan(&results).Error
-
-	if err != nil || len(results) == 0 {
-		return []models.AnalyticsResponse{}
+	err := r.db.Raw(query, lastHour, lastDay, since).Scan(&results).Error
+	if err != nil {
+		r.logger.WithError(err).Error("Failed to execute raw SQL analytics query for all ads")
+		return allAnalytics
 	}
 
-	analytics := make([]models.AnalyticsResponse, len(results))
-	for i, result := range results {
-		// Calculate last hour and last day for each ad
-		var lastHour, lastDay int64
-		r.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", result.AdID, now.Add(-time.Hour)).Count(&lastHour)
-		r.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", result.AdID, now.Add(-24*time.Hour)).Count(&lastDay)
-
-		analytics[i] = models.AnalyticsResponse{
+	// Convert results to AnalyticsResponse
+	for _, result := range results {
+		analytics := models.AnalyticsResponse{
 			AdID:       result.AdID,
-			ClickCount: result.ClickCount,
-			LastHour:   lastHour,
-			LastDay:    lastDay,
+			ClickCount: result.TotalClicks,
+			LastHour:   result.LastHour,
+			LastDay:    result.LastDay,
 		}
+		allAnalytics = append(allAnalytics, analytics)
 	}
 
-	return analytics
+	r.logger.WithFields(logrus.Fields{
+		"results_count": len(allAnalytics),
+		"since":         since,
+		"method":        "raw_sql",
+	}).Info("Retrieved all analytics using raw SQL")
+
+	return allAnalytics
 }
