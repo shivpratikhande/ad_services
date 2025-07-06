@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"ad-tracking-system/internal/services"
 
 	"github.com/gin-gonic/gin"
+	"github.com/segmentio/kafka-go"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
@@ -20,9 +22,10 @@ type Server struct {
 	logger              *logrus.Logger
 	clickQueue          *services.ClickQueue
 	analyticsRepository *repository.AnalyticsRepository
+	KafkaWriter         *kafka.Writer
 }
 
-func NewServer(db *gorm.DB, logger *logrus.Logger) *Server {
+func NewServer(db *gorm.DB, logger *logrus.Logger, kafkaWriter *kafka.Writer) *Server {
 	clickQueue := services.NewClickQueue(db, logger, 10000)
 	analyticsRepo := repository.NewAnalyticsRepository(db)
 	return &Server{
@@ -30,6 +33,7 @@ func NewServer(db *gorm.DB, logger *logrus.Logger) *Server {
 		logger:              logger,
 		clickQueue:          clickQueue,
 		analyticsRepository: analyticsRepo,
+		KafkaWriter:         kafkaWriter,
 	}
 }
 
@@ -65,14 +69,12 @@ func (s *Server) PostClick(c *gin.Context) {
 		return
 	}
 
-	// Validate ad exists
 	var ad models.Ad
 	if err := s.db.First(&ad, req.AdID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Ad not found"})
 		return
 	}
 
-	// Create click event
 	clickEvent := models.ClickEvent{
 		AdID:              req.AdID,
 		Timestamp:         time.Now(),
@@ -85,9 +87,7 @@ func (s *Server) PostClick(c *gin.Context) {
 		clickEvent.Timestamp = time.Unix(req.Timestamp, 0)
 	}
 
-	// Enqueue for async processing
 	if !s.clickQueue.Enqueue(clickEvent) {
-		// Fallback to synchronous processing if queue is full
 		if err := s.db.Create(&clickEvent).Error; err != nil {
 			s.logger.WithError(err).Error("Failed to save click event")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record click"})
@@ -95,11 +95,27 @@ func (s *Server) PostClick(c *gin.Context) {
 		}
 	}
 
-	// Update metrics
 	metrics.ClicksReceived.WithLabelValues(strconv.FormatUint(uint64(req.AdID), 10)).Inc()
 	metrics.QueueSize.Set(float64(len(s.clickQueue.GetEvents())))
 
-	// Return immediately to client
+	// Kafka: serialize and publish the event
+	eventBytes, err := json.Marshal(clickEvent)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to serialize click event")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	err = s.KafkaWriter.WriteMessages(
+		c,
+		kafka.Message{
+			Key:   []byte(strconv.Itoa(int(clickEvent.AdID))),
+			Value: eventBytes,
+		},
+	)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to publish click event to Kafka")
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 }
 
@@ -120,11 +136,53 @@ func (s *Server) GetAnalytics(c *gin.Context) {
 		duration = 24 * time.Hour
 	case "7d":
 		duration = 7 * 24 * time.Hour
+	case "all":
+		duration = 10 * 365 * 24 * time.Hour // 10 years
 	default:
 		duration = 24 * time.Hour
 	}
 
-	since := time.Now().Add(-duration)
+	// Use UTC time for consistency with database
+	since := time.Now().UTC().Add(-duration)
+
+	// For debugging: also try beginning of today
+	beginningOfToday := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.UTC)
+
+	// Debug logging
+	s.logger.WithFields(logrus.Fields{
+		"timeframe": timeframe,
+		"duration":  duration,
+		"since":     since,
+		"now":       time.Now().UTC(),
+		"ad_id":     adIDStr,
+	}).Info("Analytics request parameters")
+
+	// Quick debug: count total records
+	var totalCount int64
+	s.db.Model(&models.ClickEvent{}).Count(&totalCount)
+
+	var filteredCount int64
+	var filteredCountToday int64
+	if adIDStr != "" {
+		adID, err := strconv.ParseUint(adIDStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ad_id"})
+			return
+		}
+		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), since).Count(&filteredCount)
+		s.db.Model(&models.ClickEvent{}).Where("ad_id = ? AND timestamp >= ?", uint(adID), beginningOfToday).Count(&filteredCountToday)
+	} else {
+		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", since).Count(&filteredCount)
+		s.db.Model(&models.ClickEvent{}).Where("timestamp >= ?", beginningOfToday).Count(&filteredCountToday)
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"total_count":          totalCount,
+		"filtered_count":       filteredCount,
+		"filtered_count_today": filteredCountToday,
+		"since":                since,
+		"beginning_of_today":   beginningOfToday,
+	}).Info("Record counts")
 
 	if adIDStr != "" {
 		// Analytics for specific ad
@@ -135,11 +193,35 @@ func (s *Server) GetAnalytics(c *gin.Context) {
 		}
 
 		analytics := s.analyticsRepository.GetAdAnalytics(uint(adID), since)
-		c.JSON(http.StatusOK, analytics)
+
+		// Add debug info
+		c.JSON(http.StatusOK, gin.H{
+			"analytics": analytics,
+			"debug": gin.H{
+				"total_records":          totalCount,
+				"filtered_records":       filteredCount,
+				"filtered_records_today": filteredCountToday,
+				"since":                  since,
+				"beginning_of_today":     beginningOfToday,
+				"now":                    time.Now().UTC(),
+			},
+		})
 	} else {
 		// Analytics for all ads
 		analytics := s.analyticsRepository.GetAllAnalytics(since)
-		c.JSON(http.StatusOK, gin.H{"analytics": analytics})
+
+		// Added debug info
+		c.JSON(http.StatusOK, gin.H{
+			"analytics": analytics,
+			"debug": gin.H{
+				"total_records":          totalCount,
+				"filtered_records":       filteredCount,
+				"filtered_records_today": filteredCountToday,
+				"since":                  since,
+				"beginning_of_today":     beginningOfToday,
+				"now":                    time.Now().UTC(),
+			},
+		})
 	}
 }
 

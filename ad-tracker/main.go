@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/segmentio/kafka-go"
 )
 
 func main() {
@@ -23,23 +24,46 @@ func main() {
 	logLevel := config.GetEnv("LOG_LEVEL", "info")
 	log := logger.SetupLogger(logLevel)
 
-	// database connnection
+	// Kafka configuration
+	kafkaBroker := config.GetEnv("KAFKA_BROKER", "localhost:9092")
+	kafkaTopic := config.GetEnv("KAFKA_TOPIC", "ad-events")
+
+	// kafka new writer
+	kafkaWriter := &kafka.Writer{
+		Addr:         kafka.TCP(kafkaBroker),
+		Topic:        kafkaTopic,
+		Balancer:     &kafka.LeastBytes{},
+		BatchSize:    100,
+		BatchTimeout: 10 * time.Millisecond,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		RequiredAcks: kafka.RequireOne,
+		Async:        false,
+	}
+
+	defer func() {
+		if err := kafkaWriter.Close(); err != nil {
+			log.WithError(err).Error("Failed to close Kafka writer")
+		}
+	}()
+
+	// db connection
 	databaseURL := config.GetEnv("DATABASE_URL", "postgresql://neondb_owner:npg_2gSkEdIJryj9@ep-delicate-sea-a8qjn7u5-pooler.eastus2.azure.neon.tech/neondb?sslmode=require&channel_binding=require")
 	db, err := database.SetupDatabase(databaseURL)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to connect to database")
 	}
 
-	// Seed database with sample data
+	// feed db with sample data
 	if err := database.SeedDatabase(db); err != nil {
 		log.WithError(err).Warn("Failed to seed database")
 	}
 
-	// Create server
-	server := handlers.NewServer(db, log)
+	server := handlers.NewServer(db, log, kafkaWriter)
 
 	// Start click queue processor
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go server.GetClickQueue().StartProcessor(ctx)
 
 	// Setup Gin router
@@ -60,20 +84,16 @@ func main() {
 		api.GET("/ads/analytics", server.GetAnalytics)
 	}
 
-	// Health check
 	r.GET("/health", server.Health)
 
-	// Metrics endpoint
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// Start server
 	port := config.GetEnv("PORT", "8080")
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: r,
 	}
 
-	// Graceful shutdown
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.WithError(err).Fatal("Failed to start server")
@@ -82,17 +102,14 @@ func main() {
 
 	log.WithField("port", port).Info("Server started")
 
-	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Info("Shutting down server...")
 
-	// Cancel context for click processor
 	cancel()
 
-	// Shutdown server
 	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 
