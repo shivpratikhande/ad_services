@@ -48,7 +48,7 @@ func main() {
 	}()
 
 	// db connection
-	databaseURL := config.GetEnv("DATABASE_URL", "postgresql://neondb_owner:npg_2gSkEdIJryj9@ep-delicate-sea-a8qjn7u5-pooler.eastus2.azure.neon.tech/neondb?sslmode=require&channel_binding=require")
+	databaseURL := config.GetEnv("DATABASE_URL", "postgres://user:password@localhost:5432/adtracker?sslmode=disable")
 	db, err := database.SetupDatabase(databaseURL)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to connect to database")
