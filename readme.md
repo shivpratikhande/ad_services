@@ -2,6 +2,24 @@
 
 A high-performance, scalable ad tracking system built with Go, PostgreSQL, and Redis. Features real-time analytics, comprehensive monitoring, and production-ready architecture.
 
+![image](https://github.com/user-attachments/assets/f57567ea-99d9-4855-9710-f1b31c2650ac)
+
+
+## 📊 Monitoring
+
+Access the monitoring stack:
+
+- **Application**: http://localhost:8080
+- **Prometheus**: http://localhost:9090
+- **Grafana**: http://localhost:3000 (admin/admin)
+- **pgAdmin**: http://localhost:5050 (admin@example.com/admin)
+
+![image](https://github.com/user-attachments/assets/cd0c7fcf-229c-41c8-a6fc-0d258ad5c1bd)
+![image](https://github.com/user-attachments/assets/69f4f97a-3807-4277-ad26-56ea5080a2fa)
+
+
+
+
 ## 🚀 Features
 
 - **High Performance**: Handles concurrent requests with async processing
@@ -10,6 +28,7 @@ A high-performance, scalable ad tracking system built with Go, PostgreSQL, and R
 - **Scalability**: Designed for high-traffic scenarios
 - **Monitoring**: Prometheus metrics and Grafana dashboards
 - **Production Ready**: Docker containerization and comprehensive logging
+
 
 ## 📋 API Endpoints
 
@@ -80,7 +99,7 @@ Returns analytics data for ads.
 
 ### 1. Clone and Setup
 ```bash
-git clone <repository-url>
+git clone https://github.com/shivpratikhande/manhattan_assign.git
 cd ad-tracking-system
 make setup
 ```
@@ -135,16 +154,6 @@ make test-coverage
 # Run load tests
 make load-test
 ```
-
-## 📊 Monitoring
-
-Access the monitoring stack:
-
-- **Application**: http://localhost:8080
-- **Prometheus**: http://localhost:9090
-- **Grafana**: http://localhost:3000 (admin/admin)
-- **pgAdmin**: http://localhost:5050 (admin@example.com/admin)
-
 ### Key Metrics
 - `ad_clicks_received_total`: Total clicks received
 - `ad_clicks_processed_total`: Total clicks processed
@@ -277,20 +286,3 @@ make clean          # Clean up resources
 - Adjust batch processing parameters
 - Add database indexes for analytics queries
 - Configure connection pooling
-
-## 📚 Documentation
-
-- [API Documentation](docs/api.md)
-- [Architecture Guide](docs/architecture.md)
-- [Deployment Guide](docs/deployment.md)
-- [Troubleshooting](docs/troubleshooting.md)
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📄
