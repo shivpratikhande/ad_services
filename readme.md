@@ -99,7 +99,7 @@ Returns analytics data for ads.
 
 ### 1. Clone and Setup
 ```bash
-git clone https://github.com/shivpratikhande/manhattan_assign.git
+git clone https://github.com/shivpratikhande/ad_services.git
 cd ad-tracking-system
 make setup
 ```
